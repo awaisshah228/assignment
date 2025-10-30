@@ -111,47 +111,57 @@ app.get('/users/:id', async (req: Request, res: Response): Promise<void> => {
         error: 'User not found',
         message: `User with ID ${userId} does not exist`,
       });
+      return;
     } else {
       res.status(500).json({
         error: 'Internal server error',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
+      return;
     }
   }
 });
 
 // POST /users - Create a new user
 app.post('/users', async (req: Request, res: Response): Promise<void> => {
-  const { name, email } = req.body;
+  try {
+    const { name, email } = req.body;
 
-  if (!name || !email) {
-    res.status(400).json({
-      error: 'Invalid request',
-      message: 'Name and email are required',
+    if (!name || !email) {
+      res.status(400).json({
+        error: 'Invalid request',
+        message: 'Name and email are required',
+      });
+      return;
+    }
+
+    // Generate new ID
+    const existingIds = Object.keys(mockUsers).map(Number);
+    const newId = Math.max(...existingIds, 0) + 1;
+
+    const newUser: User = {
+      id: newId,
+      name,
+      email,
+    };
+
+    // Add to mock data
+    mockUsers[newId] = newUser;
+
+    // Add to cache
+    userCache.set(newId.toString(), newUser);
+
+    res.status(201).json({
+      message: 'User created successfully',
+      data: newUser,
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error instanceof Error ? error.message : 'Unknown error',
     });
     return;
   }
-
-  // Generate new ID
-  const existingIds = Object.keys(mockUsers).map(Number);
-  const newId = Math.max(...existingIds, 0) + 1;
-
-  const newUser: User = {
-    id: newId,
-    name,
-    email,
-  };
-
-  // Add to mock data
-  mockUsers[newId] = newUser;
-
-  // Add to cache
-  userCache.set(newId.toString(), newUser);
-
-  res.status(201).json({
-    message: 'User created successfully',
-    data: newUser,
-  });
 });
 
 // DELETE /cache - Clear entire cache
