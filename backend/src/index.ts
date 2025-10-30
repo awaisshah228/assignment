@@ -2,10 +2,14 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { LRUCache } from './cache/LRUCache';
 import { RateLimiter } from './middleware/rateLimiter';
+import { errorHandler } from './middleware/errorHandler';
 import { AsyncQueue } from './queue/AsyncQueue';
 import { mockUsers, simulateDbCall } from './data/mockUsers';
 import { User, CacheStatusResponse } from './types/user';
 import { ResponseTimeTracker } from './utils/responseTracker';
+import { NotFoundError } from './errors/not-found-error';
+import { BadRequestError } from './errors/bad-request-error';
+import { ValidationError } from './errors/validation-error';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -44,8 +48,16 @@ app.get('/', (_req: Request, res: Response) => {
       createUser: 'POST /users',
       clearCache: 'DELETE /cache',
       cacheStatus: 'GET /cache-status',
+      testAsyncError: 'GET /test-async-error',
     },
   });
+});
+
+// Test endpoint: intentionally trigger an async error
+app.get('/test-async-error', async (_req: Request, _res: Response): Promise<void> => {
+  await new Promise((_resolve, reject) =>
+    setTimeout(() => reject(new BadRequestError('Async test error (expected)')), 10)
+  );
 });
 
 // GET /users/:id - Retrieve user data with caching
@@ -54,176 +66,125 @@ app.get('/users/:id', async (req: Request, res: Response): Promise<void> => {
   const userId = parseInt(req.params.id, 10);
 
   if (isNaN(userId)) {
-    res.status(400).json({
-      error: 'Invalid user ID',
-      message: 'User ID must be a number',
+    throw new BadRequestError('User ID must be a number');
+  }
+
+  // Check cache first
+  const cachedUser = userCache.get(userId.toString());
+  if (cachedUser) {
+    const responseTime = Date.now() - startTime;
+    responseTracker.track(responseTime);
+    res.json({
+      data: cachedUser,
+      cached: true,
+      responseTime: `${responseTime}ms`,
     });
     return;
   }
 
-  try {
-    // Check cache first
-    const cachedUser = userCache.get(userId.toString());
-    if (cachedUser) {
-      const responseTime = Date.now() - startTime;
-      responseTracker.track(responseTime);
-      res.json({
-        data: cachedUser,
-        cached: true,
-        responseTime: `${responseTime}ms`,
-      });
-      return;
+  // Use queue to handle concurrent requests efficiently
+  const user = await requestQueue.enqueue(userId.toString(), async () => {
+    // Check cache again in case it was populated while waiting
+    const cachedWhileWaiting = userCache.get(userId.toString());
+    if (cachedWhileWaiting) {
+      return cachedWhileWaiting;
     }
 
-    // Use queue to handle concurrent requests efficiently
-    const user = await requestQueue.enqueue(userId.toString(), async () => {
-      // Check cache again in case it was populated while waiting
-      const cachedWhileWaiting = userCache.get(userId.toString());
-      if (cachedWhileWaiting) {
-        return cachedWhileWaiting;
-      }
-
-      // Simulate database call
-      const userData = mockUsers[userId];
-      if (!userData) {
-        throw new Error('User not found');
-      }
-
-      const result = await simulateDbCall(userData, 200);
-      
-      // Update cache
-      userCache.set(userId.toString(), result);
-      
-      return result;
-    });
-
-    const responseTime = Date.now() - startTime;
-    responseTracker.track(responseTime);
-
-    res.json({
-      data: user,
-      cached: false,
-      responseTime: `${responseTime}ms`,
-    });
-  } catch (error) {
-    if (error instanceof Error && error.message === 'User not found') {
-      res.status(404).json({
-        error: 'User not found',
-        message: `User with ID ${userId} does not exist`,
-      });
-      return;
-    } else {
-      res.status(500).json({
-        error: 'Internal server error',
-        message: error instanceof Error ? error.message : 'Unknown error',
-      });
-      return;
+    // Simulate database call
+    const userData = mockUsers[userId];
+    if (!userData) {
+      throw new NotFoundError(`User with ID ${userId} does not exist`);
     }
-  }
+
+    const result = await simulateDbCall(userData, 200);
+    
+    // Update cache
+    userCache.set(userId.toString(), result);
+    
+    return result;
+  });
+
+  const responseTime = Date.now() - startTime;
+  responseTracker.track(responseTime);
+
+  res.json({
+    data: user,
+    cached: false,
+    responseTime: `${responseTime}ms`,
+  });
 });
 
 // POST /users - Create a new user
 app.post('/users', async (req: Request, res: Response): Promise<void> => {
-  try {
-    const { name, email } = req.body;
+  const { name, email } = req.body;
 
-    if (!name || !email) {
-      res.status(400).json({
-        error: 'Invalid request',
-        message: 'Name and email are required',
-      });
-      return;
-    }
+  const errors = [];
+  if (!name) errors.push({ field: 'name', message: 'Name is required' });
+  if (!email) errors.push({ field: 'email', message: 'Email is required' });
 
-    // Generate new ID
-    const existingIds = Object.keys(mockUsers).map(Number);
-    const newId = Math.max(...existingIds, 0) + 1;
-
-    const newUser: User = {
-      id: newId,
-      name,
-      email,
-    };
-
-    // Add to mock data
-    mockUsers[newId] = newUser;
-
-    // Add to cache
-    userCache.set(newId.toString(), newUser);
-
-    res.status(201).json({
-      message: 'User created successfully',
-      data: newUser,
-    });
-  } catch (error) {
-    res.status(500).json({
-      error: 'Internal server error',
-      message: error instanceof Error ? error.message : 'Unknown error',
-    });
-    return;
+  if (errors.length > 0) {
+    throw new ValidationError(errors);
   }
+
+  // Generate new ID
+  const existingIds = Object.keys(mockUsers).map(Number);
+  const newId = Math.max(...existingIds, 0) + 1;
+
+  const newUser: User = {
+    id: newId,
+    name,
+    email,
+  };
+
+  // Add to mock data
+  mockUsers[newId] = newUser;
+
+  // Add to cache
+  userCache.set(newId.toString(), newUser);
+
+  res.status(201).json({
+    message: 'User created successfully',
+    data: newUser,
+  });
 });
 
 // DELETE /cache - Clear entire cache
 app.delete('/cache', (_req: Request, res: Response): void => {
-  try {
-    userCache.clear();
-    responseTracker.reset();
+  userCache.clear();
+  responseTracker.reset();
 
-    res.json({
-      message: 'Cache cleared successfully',
-      timestamp: new Date().toISOString(),
-    });
-  } catch (error) {
-    res.status(500).json({
-      error: 'Internal server error',
-      message: error instanceof Error ? error.message : 'Unknown error',
-    });
-  }
+  res.json({
+    message: 'Cache cleared successfully',
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // GET /cache-status - Get cache statistics
 app.get('/cache-status', (_req: Request, res: Response): void => {
-  try {
-    const stats = userCache.getStats();
-    const totalRequests = stats.hits + stats.misses;
-    const hitRate =
-      totalRequests > 0 ? ((stats.hits / totalRequests) * 100).toFixed(2) : '0';
+  const stats = userCache.getStats();
+  const totalRequests = stats.hits + stats.misses;
+  const hitRate =
+    totalRequests > 0 ? ((stats.hits / totalRequests) * 100).toFixed(2) : '0';
 
-    const response: CacheStatusResponse = {
-      cacheSize: stats.size,
-      hits: stats.hits,
-      misses: stats.misses,
-      hitRate: `${hitRate}%`,
-      evictions: stats.evictions,
-      averageResponseTime: `${responseTracker.getAverage().toFixed(2)}ms`,
-    };
+  const response: CacheStatusResponse = {
+    cacheSize: stats.size,
+    hits: stats.hits,
+    misses: stats.misses,
+    hitRate: `${hitRate}%`,
+    evictions: stats.evictions,
+    averageResponseTime: `${responseTracker.getAverage().toFixed(2)}ms`,
+  };
 
-    res.json(response);
-  } catch (error) {
-    res.status(500).json({
-      error: 'Internal server error',
-      message: error instanceof Error ? error.message : 'Unknown error',
-    });
-  }
-});
-
-// Error handling middleware
-app.use((err: Error, _req: Request, res: Response, _next: unknown) => {
-  console.error('Unhandled error:', err);
-  res.status(500).json({
-    error: 'Internal server error',
-    message: err.message,
-  });
+  res.json(response);
 });
 
 // 404 handler
-app.use((_req: Request, res: Response) => {
-  res.status(404).json({
-    error: 'Not found',
-    message: 'The requested endpoint does not exist',
-  });
+app.use((_req: Request, _res: Response) => {
+  throw new NotFoundError('The requested endpoint does not exist');
 });
+
+// Error handling middleware (must be last)
+app.use(errorHandler);
 
 // Start server
 app.listen(PORT, () => {
