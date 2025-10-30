@@ -166,32 +166,46 @@ app.post('/users', async (req: Request, res: Response): Promise<void> => {
 
 // DELETE /cache - Clear entire cache
 app.delete('/cache', (_req: Request, res: Response): void => {
-  userCache.clear();
-  responseTracker.reset();
+  try {
+    userCache.clear();
+    responseTracker.reset();
 
-  res.json({
-    message: 'Cache cleared successfully',
-    timestamp: new Date().toISOString(),
-  });
+    res.json({
+      message: 'Cache cleared successfully',
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
 });
 
 // GET /cache-status - Get cache statistics
 app.get('/cache-status', (_req: Request, res: Response): void => {
-  const stats = userCache.getStats();
-  const totalRequests = stats.hits + stats.misses;
-  const hitRate =
-    totalRequests > 0 ? ((stats.hits / totalRequests) * 100).toFixed(2) : '0';
+  try {
+    const stats = userCache.getStats();
+    const totalRequests = stats.hits + stats.misses;
+    const hitRate =
+      totalRequests > 0 ? ((stats.hits / totalRequests) * 100).toFixed(2) : '0';
 
-  const response: CacheStatusResponse = {
-    cacheSize: stats.size,
-    hits: stats.hits,
-    misses: stats.misses,
-    hitRate: `${hitRate}%`,
-    evictions: stats.evictions,
-    averageResponseTime: `${responseTracker.getAverage().toFixed(2)}ms`,
-  };
+    const response: CacheStatusResponse = {
+      cacheSize: stats.size,
+      hits: stats.hits,
+      misses: stats.misses,
+      hitRate: `${hitRate}%`,
+      evictions: stats.evictions,
+      averageResponseTime: `${responseTracker.getAverage().toFixed(2)}ms`,
+    };
 
-  res.json(response);
+    res.json(response);
+  } catch (error) {
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
 });
 
 // Error handling middleware
